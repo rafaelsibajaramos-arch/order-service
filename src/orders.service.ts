@@ -39,6 +39,7 @@ export class OrdersService {
   }
   async get(id: string) { const order = await this.prisma.order.findUnique({ where: { id }, include: { items: true } }); if (!order) throw new NotFoundException('Pedido no encontrado'); return order; }
   async create(dto: CreateOrderDto, buyerId: string, bearer: string, gatewayUserId?: string, gatewayRoles?: string, upstreams: CheckoutUpstreams = {}, correlationId: string = randomUUID()) {
+    this.validateDestination(dto);
     if (dto.buyerId !== buyerId) throw new ForbiddenException('El comprador no coincide con el token');
     const inventoryUrl = this.url(upstreams.inventory, 'INVENTORY_SERVICE_URL', 'http://localhost:3004');
     if (dto.idempotencyKey) { const previous = await this.prisma.order.findUnique({ where: { idempotencyKey: dto.idempotencyKey }, include: { items: true } }); if (previous) return previous; }
@@ -60,12 +61,13 @@ export class OrdersService {
     const items = reservations.map((item) => ({ ...item, subtotal: item.quantity * item.unitPrice }));
     const totalAmount = items.reduce((sum, item) => sum + item.subtotal, 0);
     return this.prisma.$transaction(async (tx) => {
-      const order = await tx.order.create({ data: { buyerId: dto.buyerId, simulatedCardId: dto.simulatedCardId, deliveryAddress: dto.deliveryAddress, currency: dto.currency ?? 'COP', totalAmount, idempotencyKey: dto.idempotencyKey, items: { create: items.map((item) => ({ ...item, harvestBatchId: item.harvestBatchId, farmId: item.farmId, pickupAddress: item.pickupAddress, pickupLatitude: item.pickupLatitude, pickupLongitude: item.pickupLongitude })) } }, include: { items: true } });
+      const order = await tx.order.create({ data: { buyerId: dto.buyerId, simulatedCardId: dto.simulatedCardId, deliveryAddress: dto.deliveryAddress, deliveryLatitude: dto.deliveryLatitude, deliveryLongitude: dto.deliveryLongitude, currency: dto.currency ?? 'COP', totalAmount, idempotencyKey: dto.idempotencyKey, items: { create: items.map((item) => ({ ...item, harvestBatchId: item.harvestBatchId, farmId: item.farmId, pickupAddress: item.pickupAddress, pickupLatitude: item.pickupLatitude, pickupLongitude: item.pickupLongitude })) } }, include: { items: true } });
       await tx.outboxEvent.create({ data: { eventType: 'order.created', aggregateId: order.id, correlationId, payload: toJsonValue(order)! } });
       return order;
     });
   }
   async startCheckoutSaga(dto: CreateOrderDto, buyerId: string, bearer: string, gatewayUserId?: string, gatewayRoles?: string, upstreams: CheckoutUpstreams = {}, correlationId: string = randomUUID()) {
+    this.validateDestination(dto);
     if (dto.buyerId !== buyerId) throw new ForbiddenException('El comprador no coincide con el token');
     dto.items = aggregateOrderItems(dto.items);
     const existing = dto.idempotencyKey ? await this.prisma.order.findUnique({ where: { idempotencyKey: dto.idempotencyKey }, include: { items: true } }) : null;
@@ -82,7 +84,7 @@ export class OrdersService {
         if (raced) return { order: raced, processing: raced.status === OrderStatus.pending, replayed: true };
       }
       const order = await tx.order.create({ data: {
-        buyerId, simulatedCardId: dto.simulatedCardId, deliveryAddress: dto.deliveryAddress, currency: dto.currency ?? 'COP', totalAmount: total, idempotencyKey: dto.idempotencyKey,
+        buyerId, simulatedCardId: dto.simulatedCardId, deliveryAddress: dto.deliveryAddress, deliveryLatitude: dto.deliveryLatitude, deliveryLongitude: dto.deliveryLongitude, currency: dto.currency ?? 'COP', totalAmount: total, idempotencyKey: dto.idempotencyKey,
         items: { create: resolved.map((item) => ({ productId: item.productId, producerId: item.producerId, producerName: item.producerName, productName: item.productName, quantity: item.quantity, unitPrice: item.unitPrice, subtotal: new Prisma.Decimal(item.quantity).times(new Prisma.Decimal(item.unitPrice)).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP), priceVersionId: item.priceVersionId })) },
       }, include: { items: true } });
       await tx.outboxEvent.create({ data: { eventType: 'order.created', aggregateId: order.id, correlationId, payload: {
@@ -145,13 +147,14 @@ export class OrdersService {
           changed = await tx.order.findUniqueOrThrow({ where: { id: orderId }, include: { items: true } });
           const cart = await tx.cart.findUnique({ where: { buyerId: changed.buyerId } });
           if (cart) await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
-          await tx.outboxEvent.create({ data: { eventType: 'order.confirmed', aggregateId: orderId, correlationId: event.correlation_id, payload: { orderId, buyerId: changed.buyerId, paymentId: changed.paymentId, status: changed.status, totalAmount: changed.totalAmount.toString(), currency: changed.currency, deliveryAddress: changed.deliveryAddress, items: changed.items.map((item) => ({ id: item.id, productId: item.productId, productName: item.productName, producerId: item.producerId, producerName: item.producerName, reservationId: item.reservationId, harvestBatchId: item.harvestBatchId, farmId: item.farmId, pickupAddress: item.pickupAddress, pickupLatitude: item.pickupLatitude == null ? null : Number(item.pickupLatitude), pickupLongitude: item.pickupLongitude == null ? null : Number(item.pickupLongitude), quantity: item.quantity.toString(), unitPrice: item.unitPrice.toString(), subtotal: item.subtotal.toString() })) } } });
+          await tx.outboxEvent.create({ data: { eventType: 'order.confirmed', aggregateId: orderId, correlationId: event.correlation_id, payload: { orderId, buyerId: changed.buyerId, paymentId: changed.paymentId, status: changed.status, totalAmount: changed.totalAmount.toString(), currency: changed.currency, deliveryAddress: changed.deliveryAddress, deliveryLatitude: changed.deliveryLatitude, deliveryLongitude: changed.deliveryLongitude, items: changed.items.map((item) => ({ id: item.id, productId: item.productId, productName: item.productName, producerId: item.producerId, producerName: item.producerName, reservationId: item.reservationId, harvestBatchId: item.harvestBatchId, farmId: item.farmId, pickupAddress: item.pickupAddress, pickupLatitude: item.pickupLatitude == null ? null : Number(item.pickupLatitude), pickupLongitude: item.pickupLongitude == null ? null : Number(item.pickupLongitude), quantity: item.quantity.toString(), unitPrice: item.unitPrice.toString(), subtotal: item.subtotal.toString() })) } } });
         }
       }
       return changed;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
   async checkout(dto: CreateOrderDto, buyerId: string, bearer: string, gatewayUserId?: string, gatewayRoles?: string, upstreams: CheckoutUpstreams = {}, correlationId: string = randomUUID()) {
+    this.validateDestination(dto);
     dto.items = aggregateOrderItems(dto.items);
     this.logger.log(`checkout_started buyer=${buyerId} key=${dto.idempotencyKey ?? 'none'}`);
     let order = dto.idempotencyKey
@@ -230,7 +233,7 @@ export class OrdersService {
         const updated = await tx.order.update({ where: { id: order.id }, data: { status: OrderStatus.confirmed, paymentStatus: PaymentStatus.authorized }, include: { items: true } });
         const cart = await tx.cart.findUnique({ where: { buyerId } });
         if (cart) await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
-        await tx.outboxEvent.create({ data: { eventType: 'order.confirmed', aggregateId: updated.id, correlationId, payload: { orderId: updated.id, buyerId, paymentId: payment.id, status: updated.status, totalAmount: updated.totalAmount.toString(), currency: updated.currency, deliveryAddress: updated.deliveryAddress, items: updated.items.map((item) => ({ id: item.id, productId: item.productId, productName: item.productName, producerId: item.producerId, producerName: item.producerName, reservationId: item.reservationId, harvestBatchId: item.harvestBatchId, farmId: item.farmId, pickupAddress: item.pickupAddress, pickupLatitude: item.pickupLatitude == null ? null : Number(item.pickupLatitude), pickupLongitude: item.pickupLongitude == null ? null : Number(item.pickupLongitude), quantity: item.quantity.toString(), unitPrice: item.unitPrice.toString(), subtotal: item.subtotal.toString() })) } } });
+        await tx.outboxEvent.create({ data: { eventType: 'order.confirmed', aggregateId: updated.id, correlationId, payload: { orderId: updated.id, buyerId, paymentId: payment.id, status: updated.status, totalAmount: updated.totalAmount.toString(), currency: updated.currency, deliveryAddress: updated.deliveryAddress, deliveryLatitude: updated.deliveryLatitude, deliveryLongitude: updated.deliveryLongitude, items: updated.items.map((item) => ({ id: item.id, productId: item.productId, productName: item.productName, producerId: item.producerId, producerName: item.producerName, reservationId: item.reservationId, harvestBatchId: item.harvestBatchId, farmId: item.farmId, pickupAddress: item.pickupAddress, pickupLatitude: item.pickupLatitude == null ? null : Number(item.pickupLatitude), pickupLongitude: item.pickupLongitude == null ? null : Number(item.pickupLongitude), quantity: item.quantity.toString(), unitPrice: item.unitPrice.toString(), subtotal: item.subtotal.toString() })) } } });
         return updated;
       });
       this.logger.log(`checkout_confirmed order=${confirmed.id}`);
@@ -355,6 +358,10 @@ export class OrdersService {
   getCart(buyerId: string) { return this.prisma.cart.findUnique({ where: { buyerId }, include: { items: true } }); }
   upsertCart(buyerId: string, dto: UpsertCartDto) { return this.prisma.cart.upsert({ where: { buyerId }, create: { buyerId, items: { create: dto.items } }, update: { items: { deleteMany: {}, create: dto.items } }, include: { items: true } }); }
   clearCart(buyerId: string) { return this.prisma.cart.update({ where: { buyerId }, data: { items: { deleteMany: {} } }, include: { items: true } }); }
+  private validateDestination(dto: CreateOrderDto) {
+    if ((dto.deliveryLatitude == null) !== (dto.deliveryLongitude == null)) throw new ConflictException('Confirma ambas coordenadas de entrega');
+    if (dto.deliveryAddress.trim().length < 3) throw new ConflictException('Indica una dirección de entrega completa');
+  }
   private headers(bearer: string) { return { authorization: `Bearer ${bearer}` }; }
   private async findAuthorizedPayment(paymentUrl: string, orderId: string, bearer: string, gatewayUserId?: string, gatewayRoles?: string, correlationId?: string) {
     try {

@@ -40,6 +40,8 @@ model Order {
   totalAmount     Decimal       @db.Decimal(12, 2)
   currency        String        @default("COP") @db.VarChar(3)
   deliveryAddress String        @db.VarChar(500)
+  deliveryLatitude Float?
+  deliveryLongitude Float?
   paymentStatus   PaymentStatus @default(pending)
   checkoutInventoryStatus String @default("pending") @db.VarChar(24)
   paymentId       String?       @db.Uuid
