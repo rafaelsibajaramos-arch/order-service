@@ -7,7 +7,6 @@ export class OrderItemDto {
 }
 export class CreateOrderDto {
   @IsUUID() buyerId!: string;
-  @IsUUID() simulatedCardId?: string;
   @IsString() @MaxLength(500) deliveryAddress!: string;
   @IsOptional() @IsNumber() @Min(-90) @Max(90) deliveryLatitude?: number;
   @IsOptional() @IsNumber() @Min(-180) @Max(180) deliveryLongitude?: number;
